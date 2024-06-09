@@ -1,0 +1,120 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# AWS IAM Identity Center permission sets for the Security Hub notifications Service catalog product 
+# This allows granting the least privileges to users requesting the service catalog product.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Security Notifications product IAM Identity Center permission sets
+
+Parameters:
+  AWSIdentityCenterInstanceArn:
+    Description: >-
+      The AWS IAM Identity Center instance ARN. Get this from the AWS Identity Center settings page, 
+      or with the AWS CloudShell: 
+      aws --output text sso-admin list-instances --query Instances[].InstanceArn
+    Type: String
+    AllowedPattern: arn:.*:sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}
+
+  ServiceCatalogProductID:
+    Description: >-
+      The Service Catalog Product ID for the Security Notifications product (prod-...)
+    Type: String
+    AllowedPattern: ^prod-.*$
+
+  PermissionSetName:
+    Description: >-
+      Name of permission set to create. Use SubscribeToSecurityNotifications if you used the install.sh script default.
+    Type: String
+    Default: SubscribeToSecurityNotifications
+
+Mappings:
+  Configuration:
+    Variables:
+      LaunchRoleName: SecurityHubNotificationsServiceCatalogLaunchRole
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterLabels:
+      AWSIdentityCenterInstanceArn:
+        default: AWS IAM Identity Center Instance ARN
+      PermissionSetName:
+        default: Permission set name
+      ServiceCatalogProductID:
+        default: Service Catalog product ID
+
+Resources:
+
+  PermissionSetSecurityNotification:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: !Ref PermissionSetName
+      Description: Allows users to subscribe to security notifications with Service Catalog
+      InstanceArn: !Ref AWSIdentityCenterInstanceArn
+      RelayStateType: !Sub https://${AWS::Region}.console.aws.amazon.com/servicecatalog/home?region=${AWS::Region}#products/${ServiceCatalogProductID}
+      SessionDuration: PT8H
+      InlinePolicy:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ServiceCatalogProductActions
+            Effect: Allow
+            Action: 
+              - servicecatalog:DescribeProduct
+              - servicecatalog:DescribeProvisioningParameters
+              - servicecatalog:ListLaunchPaths
+              - servicecatalog:ProvisionProduct
+            Resource: !Sub arn:${AWS::Partition}:catalog:${AWS::Region}:*:product/${ServiceCatalogProductID}
+
+          - Sid: ServiceCatalogActionsNotSupportingResourceRestriction
+            Effect: Allow
+            Action: 
+              - servicecatalog:DescribeProductView
+              - servicecatalog:SearchProducts
+            Resource: '*'
+
+          - Sid: CloudFormationPermissionsSC
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ListChangeSets
+              - cloudformation:ListStackResources
+            Resource:
+              - arn:aws:cloudformation:*:*:stack/SC-*
+              - arn:aws:cloudformation:*:*:changeSet/SC-*
+
+          - Sid: ServiceCatalogUserOwnedProvisionedProductAccess
+            Effect: Allow
+            Action: 
+              - servicecatalog:DescribeProvisionedProduct
+              - servicecatalog:DescribeRecord
+              - servicecatalog:ListRecordHistory
+              - servicecatalog:ScanProvisionedProducts
+              - servicecatalog:TerminateProvisionedProduct
+              - servicecatalog:UpdateProvisionedProduct
+              - servicecatalog:SearchProvisionedProducts
+              - servicecatalog:CreateProvisionedProductPlan
+              - servicecatalog:DescribeProvisionedProductPlan
+              - servicecatalog:ExecuteProvisionedProductPlan
+              - servicecatalog:DeleteProvisionedProductPlan
+              - servicecatalog:ListProvisionedProductPlans
+              - servicecatalog:ListServiceActionsForProvisioningArtifact
+              - servicecatalog:ExecuteProvisionedProductServiceAction
+              - servicecatalog:DescribeServiceActionExecutionParameters
+            Resource: '*'
+            Condition:
+              StringEquals:
+                servicecatalog:userLevel: self
+
+          - Sid: AllowPassServiceCatalogLaunchRole
+            Effect: Allow
+            Action: 
+              - iam:PassRole
+            Resource: !Sub 
+              - arn:${AWS::Partition}:iam::*:role/${LaunchRoleName}
+              - LaunchRoleName: !FindInMap [ Configuration, Variables, LaunchRoleName ]
+            Condition:
+              StringEquals:
+                iam:PassedToService: servicecatalog.amazonaws.com
+

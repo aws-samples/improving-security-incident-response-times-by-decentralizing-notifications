@@ -1,0 +1,142 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# CloudFormation template for creating the Security Hub notification Service Catalog product and portfolio
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Security Hub Notifications Service Catalog portfolio and product
+
+Parameters:
+  ProviderName:
+    Type: String
+    Description: Organization name
+
+  ProductVersion:
+    Type: String
+    Description: Product version
+    Default: v1
+
+  DeployedIAMRoleStackSet:
+    Type: String
+    Description: Whether the IAM role StackSet, with the launch role, was deployed to the AWS accounts.
+    Default: "No"
+    AllowedValues:
+      - "Yes"
+      - "No"
+
+  PrincipalType:
+    Type: String
+    Description: Type of principal
+    AllowedValues:
+         - IAM_Identity_Center_Permission_Set
+         - IAM_role_name
+    Default: IAM_Identity_Center_Permission_Set
+ 
+  IAMIdentityCenterRegion:
+    Type: String
+    Description: (Only required if PrincipalType is IAM_Identity_Center_Permission_Set) IAM Identity Center home region
+    Default: "us-east-1"
+
+  PrincipalName01:
+    Type: String
+    Description: IAM role name or permission set that can access the Service Catalog product
+    Default: AWSAdministratorAccess
+
+  PrincipalName02:
+    Type: String
+    Description: (Optional) IAM role name or permission set that can access the Service Catalog product
+    Default: ""
+
+  TemplateURL:
+    Type: String
+    Description: HTTPS S3 URL to template
+
+Conditions:
+  PrincipleTypeIAMIdentityCenter: !Equals [ !Ref PrincipalType, "IAM_Identity_Center_Permission_Set" ]
+  PrincipalName01: !Not [ !Equals [ !Ref PrincipalName01, '' ] ]
+  PrincipalName02: !Not [ !Equals [ !Ref PrincipalName02, '' ] ]
+  HasLaunchRole: !Equals [ !Ref DeployedIAMRoleStackSet, 'Yes' ]
+
+Mappings:
+  Configuration:
+    Variables:
+      LaunchRoleName: SecurityHubNotificationsServiceCatalogLaunchRole
+
+Resources:
+  Portfolio:
+    Type: AWS::ServiceCatalog::Portfolio
+    Properties:
+      AcceptLanguage: en
+      Description: "Subscribe to AWS Security Hub notifications"
+      DisplayName: "Subscribe to AWS Security Hub notifications"
+      ProviderName: !Ref ProviderName
+
+  Product:
+    Type: AWS::ServiceCatalog::CloudFormationProduct
+    Properties:
+      Description: "Subscribe to AWS Security Hub notifications"
+      Name: "Subscribe to AWS Security Hub notifications"
+      SupportDescription: Click on "Launch product" on the top right corner, and in the new page, put in your short name as the product name with no spaces, and enter the rest of the fields, and click on Launch product.
+      Owner: !Ref ProviderName
+      ProductType: CLOUD_FORMATION_TEMPLATE
+      ProvisioningArtifactParameters:
+        - Info:
+            LoadTemplateFromURL: !Ref TemplateURL
+          Name: !Ref ProductVersion 
+
+  PortfolioAssociation:
+    Type: AWS::ServiceCatalog::PortfolioProductAssociation
+    Properties:
+      PortfolioId: !Ref Portfolio
+      ProductId: !Ref Product
+
+  PortfolioPrincipalAssociation01:
+    Condition: PrincipalName01
+    Type: AWS::ServiceCatalog::PortfolioPrincipalAssociation
+    Properties:
+      PortfolioId: !Ref Portfolio
+      PrincipalType: IAM_PATTERN
+      PrincipalARN: !If 
+        - PrincipleTypeIAMIdentityCenter
+        # then, https://docs.aws.amazon.com/singlesignon/latest/userguide/referencingpermissionsets.html
+        - !Sub arn:${AWS::Partition}:iam:::role/aws-reserved/sso.amazonaws.com/${IAMIdentityCenterRegion}/AWSReservedSSO_${PrincipalName01}_*
+        # else:
+        - !Sub arn:${AWS::Partition}:iam:::role/${PrincipalName01}
+
+  PortfolioPrincipalAssociation02:
+    Condition: PrincipalName02
+    Type: AWS::ServiceCatalog::PortfolioPrincipalAssociation
+    Properties:
+      PortfolioId: !Ref Portfolio
+      PrincipalType: IAM_PATTERN
+      PrincipalARN: !If 
+        - PrincipleTypeIAMIdentityCenter
+        # then, https://docs.aws.amazon.com/singlesignon/latest/userguide/referencingpermissionsets.html
+        - !Sub arn:${AWS::Partition}:iam:::role/aws-reserved/sso.amazonaws.com/${IAMIdentityCenterRegion}/AWSReservedSSO_${PrincipalName02}_*
+        # else:
+        - !Sub arn:${AWS::Partition}:iam:::role/${PrincipalName02}
+
+
+  LaunchRoleConstraint:
+    Condition: HasLaunchRole
+    Type: AWS::ServiceCatalog::LaunchRoleConstraint
+    DependsOn: PortfolioAssociation
+    Properties:
+      PortfolioId: !Ref Portfolio
+      ProductId: !Ref Product
+      LocalRoleName: !FindInMap [ Configuration, Variables, LaunchRoleName ] 
+      Description: Launch role constraint
+
+
+Outputs:
+  PortfolioID:
+    Description: Portfolio ID
+    Value: !Ref Portfolio
+    Export:
+      Name: SecurityHubNotificationsPortfolioID
+
+  ProductID:
+    Description: Product ID
+    Value: !Ref Product
+    Export:
+      Name: SecurityHubNotificationsProductID

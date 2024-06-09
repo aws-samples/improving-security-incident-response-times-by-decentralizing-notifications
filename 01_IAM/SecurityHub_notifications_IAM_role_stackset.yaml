@@ -1,0 +1,375 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# Cloudformation template to create the StackSet for the IAM launch role for the Security Hub notifications service catalog product
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: StackSet for IAM roles for Service Catalog Security Hub notification product
+
+Parameters:
+  OrgId:
+    Description: |
+      AWS Organization ID. To get this, run AWS CloudShell, and type: 
+        aws --output text organizations describe-organization --query Organization.Id
+    Type: String
+    AllowedPattern: ^o-[a-z0-9]{10,32}$
+
+  RootOrOUIds:
+    Type: CommaDelimitedList
+    Description: |
+      The organization root ID, or comma separated list of OU IDs. 
+      Get the root ID from CloudShell with: 
+      aws --output text organizations list-roots --query Roots[0].Id
+    AllowedPattern: ^(ou-[a-z0-9]{4,32}-[a-z0-9]{8,32}|r-[a-z0-9]{4,32})$
+
+  CurrentAccountType:
+    Type: String
+    Description: > 
+        Is this account you are deploying from the management account, 
+        or a CloudFormation delegated administrator account?
+    AllowedValues:
+         - "Management account"
+         - "CloudFormation delegated admin account"
+
+  NotificationFormattingMethod:
+    Type: String
+    Description: Whether using the Lambda, or No-Lamba (native EventBridge formatting) option in the Service Catalog product.
+    AllowedValues:
+      - Lambda
+      - No-Lambda
+    Default: Lambda
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+         default: AWS Organization details
+        Parameters:
+          - OrgId
+          - RootOrOUIds
+          - CurrentAccountType
+      - Label:
+         default: Formatting method
+        Parameters:
+          - NotificationFormattingMethod
+    ParameterLabels:
+      OrgId:
+        default: AWS Organization ID
+      RootOrOUIds:
+        default: Organization root ID or OU ID(s)
+      CurrentAccountType:
+        default: Current account type
+      NotificationFormattingMethod:
+        default: Notification formatting method
+
+
+Conditions:
+     ManagementAccount: !Equals [ !Ref CurrentAccountType, "Management account" ]
+
+Resources:
+
+  IAMRoleStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      Description: IAM roles for Service Catalog Security Hub notification product
+      StackSetName: Security-Hub-Notifications-Product-IAM-Roles
+      CallAs: !If [ ManagementAccount, SELF, DELEGATED_ADMIN ]
+      Capabilities:
+        - CAPABILITY_NAMED_IAM
+      PermissionModel: SERVICE_MANAGED
+      AutoDeployment:
+        Enabled: true
+        RetainStacksOnAccountRemoval: false
+      OperationPreferences:
+        FailureTolerancePercentage: 0
+        MaxConcurrentPercentage: 50
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds: !Ref RootOrOUIds
+          Regions:
+            - !Ref AWS::Region
+      Parameters:
+        - ParameterKey: OrgId
+          ParameterValue: !Ref OrgId
+        - ParameterKey: NotificationFormattingMethod
+          ParameterValue: !Ref NotificationFormattingMethod
+      # The following was copied/pasted as is from SecurityHub_notifications_IAM_role.yaml, but indented.
+      TemplateBody: |
+        # Cloudformation template to create the IAM launch role for the Security Hub notifications service catalog product
+
+        AWSTemplateFormatVersion: 2010-09-09
+        Description: Security Hub notifications AWS Service Catalog IAM launch role
+
+        Parameters:
+          OrgId:
+            Description: |
+              AWS Organization ID. To get this, run AWS CloudShell, and type: 
+                aws --output text organizations describe-organization --query Organization.Id
+            Type: String
+            AllowedPattern: ^o-[a-z0-9]{10,32}$
+
+          NotificationFormattingMethod:
+            Type: String
+            Description: Whether using the Lambda, or No-Lamba (native EventBridge formatting) option in the Service Catalog product.
+            AllowedValues:
+              - Lambda
+              - No-Lambda
+            Default: Lambda
+
+
+        Mappings:
+          # Edit these if you want to change the role/policy names:
+          Variables:
+            CreatePermissionBoundaryName:
+              Value: SecurityHubNotificationsServiceCatalogPermissionBoundary
+            ServiceCatalogLaunchRoleName: 
+              Value: SecurityHubNotificationsServiceCatalogLaunchRole
+
+
+        Conditions:
+          UsingLambda: !Equals [ !Ref NotificationFormattingMethod, 'Lambda' ]
+
+
+        Resources:
+          # If using the Lambda version, this creates an IAM Permission Boundary to restrict CreateRole
+          SecurityHubNotificationsPermissionBoundary:
+            Type: AWS::IAM::ManagedPolicy
+            Condition: UsingLambda
+            Properties:
+              ManagedPolicyName: !FindInMap [ Variables, CreatePermissionBoundaryName, Value ]
+              PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Sid: SNSPublish
+                    Effect: Allow
+                    Action:
+                      - sns:Publish
+                      - logs:CreateLogGroup
+                      - logs:CreateLogStream
+                      - logs:PutLogEvents
+                    Resource: "*"
+
+          # This is the IAM role used by the Service Catalog product to create the Security Hub notifications resources.
+          IAMLaunchRole:
+            Type: AWS::IAM::Role
+            Properties:
+              RoleName: !FindInMap [ Variables, ServiceCatalogLaunchRoleName, Value ]
+              AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Effect: Allow
+                    Principal:
+                      Service: servicecatalog.amazonaws.com
+                    Action: sts:AssumeRole
+                    # https://aws.amazon.com/blogs/security/use-scalable-controls-for-aws-services-accessing-your-resources/
+                    Condition:
+                      StringEquals:
+                        aws:SourceOrgID: !Ref OrgId
+              Path: /
+              Policies:
+                - PolicyName: SecurityHubNotificationsServiceCatalogLaunchRolePolicy
+                  PolicyDocument:
+                    Version: 2012-10-17
+                    Statement:
+                      - Sid: CloudFormationPermissionsSC
+                        Effect: Allow
+                        Action:
+                          - cloudformation:CreateStack
+                          - cloudformation:DeleteStack
+                          - cloudformation:DescribeStackEvents
+                          - cloudformation:DescribeStacks
+                          - cloudformation:ValidateTemplate
+                          - cloudformation:UpdateStack
+                          - cloudformation:CreateChangeSet
+                          - cloudformation:DeleteChangeSet
+                          - cloudformation:DescribeChangeSet
+                          - cloudformation:ExecuteChangeSet
+                          - cloudformation:ListChangeSets
+                          - cloudformation:ListStackResources
+                          - cloudformation:TagResource
+                          - cloudformation:UntagResource
+                          - cloudformation:CancelUpdateStack
+                        Resource:
+                          - !Sub arn:${AWS::Partition}:cloudformation:*:*:stack/SC-*
+                          - !Sub arn:${AWS::Partition}:cloudformation:*:*:changeSet/SC-*
+                          - !Sub arn:${AWS::Partition}:cloudformation:*:aws:transform/LanguageExtensions
+
+                      - Sid: CloudFormationPermissions
+                        Effect: Allow
+                        Action:
+                          - cloudformation:GetTemplateSummary
+                        Resource:
+                          - '*'
+
+                      - Sid: S3Permissions
+                        Effect: Allow
+                        Action:
+                          - s3:GetObject
+                        Resource: "*"
+                        Condition:
+                          StringEquals:
+                            s3:ExistingObjectTag/servicecatalog:provisioning: "true"
+
+                      - Sid: ProductPermissionsRequired
+                        Effect: Allow
+                        Action:
+                          - sns:AddPermission
+                          - sns:ConfirmSubscription
+                          - sns:CreateTopic
+                          - sns:DeleteTopic
+                          - sns:GetTopicAttributes
+                          - sns:GetSubscriptionAttributes
+                          - sns:ListSubscriptions
+                          - sns:ListSubscriptionsByTopic
+                          - sns:ListTagsForResource
+                          - sns:ListTopics
+                          - sns:Publish
+                          - sns:RemovePermission
+                          - sns:SetSubscriptionAttributes
+                          - sns:SetTopicAttributes
+                          - sns:Subscribe
+                          - sns:TagResource
+                          - sns:Unsubscribe
+                          - sns:UntagResource
+                          - events:DeleteRule
+                          - events:DescribeRule
+                          - events:DisableRule
+                          - events:EnableRule
+                          - events:ListRules
+                          - events:ListTagsForResource
+                          - events:ListTargetsByRule
+                          - events:PutEvents
+                          - events:PutPermission
+                          - events:PutRule
+                          - events:PutTargets
+                          - events:RemovePermission
+                          - events:RemoveTargets
+                          - events:TagResource
+                          - events:UntagResource
+                        Resource: "*"
+                        Condition:
+                          ForAnyValue:StringEquals:
+                            aws:CalledVia: cloudformation.amazonaws.com
+
+                      - !If
+                        - UsingLambda
+                        # then
+                        - Sid: LambdaAndLogPermissions
+                          Effect: Allow
+                          Action:
+                            - lambda:AddPermission
+                            - lambda:CreateAlias
+                            - lambda:CreateEventSourceMapping
+                            - lambda:CreateFunction
+                            - lambda:DeleteAlias
+                            - lambda:DeleteEventSourceMapping
+                            - lambda:DeleteFunction
+                            - lambda:GetAccountSettings
+                            - lambda:GetAlias
+                            - lambda:GetEventSourceMapping
+                            - lambda:GetFunction
+                            - lambda:GetFunctionConfiguration
+                            - lambda:GetPolicy
+                            - lambda:ListAliases
+                            - lambda:ListEventSourceMappings
+                            - lambda:ListFunctions
+                            - lambda:ListTags
+                            - lambda:PublishVersion
+                            - lambda:PutFunctionEventInvokeConfig
+                            - lambda:PutRuntimeManagementConfig
+                            - lambda:RemovePermission
+                            - lambda:TagResource
+                            - lambda:UntagResource
+                            - lambda:UpdateAlias
+                            - lambda:UpdateEventSourceMapping
+                            - lambda:UpdateFunctionCode
+                            - lambda:UpdateFunctionConfiguration
+                            - lambda:UpdateFunctionEventInvokeConfig
+
+                            - logs:CreateLogGroup
+                            - logs:DescribeLogGroups
+                            - logs:DeleteLogGroup
+                            - logs:PutRetentionPolicy                  
+                            - logs:DeleteLogStream
+                            - logs:DeleteRetentionPolicy
+                            - logs:DescribeLogStreams
+                            - logs:ListTagsForResource
+                            - logs:ListTagsLogGroup
+                            - logs:TagResource
+                            - logs:UntagLogGroup
+                            - logs:UntagResource 
+                          Resource: "*"
+                          Condition:
+                            ForAnyValue:StringEquals:
+                              aws:CalledVia: cloudformation.amazonaws.com
+                        # else
+                        - !Ref AWS::NoValue
+
+                      - !If
+                        - UsingLambda
+                        # then
+                        - Sid: IAMRoleWithPermissionBoundary
+                          Effect: Allow
+                          Action:
+                            - iam:CreateRole
+                            - iam:AttachRolePolicy
+                            - iam:PutRolePolicy
+                            - iam:DetachRolePolicy
+                            - iam:DeleteRolePolicy
+                            - iam:PutRolePermissionsBoundary
+                          Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/SecNotificationLambda-*
+                          Condition:
+                            StringEquals:
+                              iam:PermissionsBoundary: !GetAtt SecurityHubNotificationsPermissionBoundary.PolicyArn
+                            ForAnyValue:StringEquals:
+                              aws:CalledVia: cloudformation.amazonaws.com
+                        # else
+                        - !Ref AWS::NoValue
+
+                      - !If
+                        - UsingLambda
+                        # then
+                        - Sid: IAMPermissionsWithNoPermissionBoundaries
+                          Effect: Allow
+                          Action:
+                            - iam:DeleteRole
+                            - iam:UpdateRole
+                            - iam:UpdateRoleDescription
+                            - iam:GetPolicy
+                            - iam:GetPolicyVersion
+                            - iam:GetRole
+                            - iam:GetRolePolicy
+                            - iam:ListAttachedRolePolicies
+                            - iam:ListRolePolicies
+                            - iam:ListRoleTags
+                            - iam:TagPolicy
+                            - iam:TagRole
+                            - iam:UntagPolicy
+                            - iam:UntagRole
+                          Resource: "*"
+                          Condition:
+                            ForAnyValue:StringEquals:
+                              aws:CalledVia: cloudformation.amazonaws.com
+                        # else
+                        - !Ref AWS::NoValue
+
+                      # Allow the SC Product CloudFormation template to pass
+                      # the dynamically created IAM role in the CFN template to Lambda
+                      - !If
+                        - UsingLambda
+                        # then
+                        - Sid: IAMAllowPassRole
+                          Effect: Allow
+                          Action:
+                            - iam:PassRole
+                          Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/SecNotificationLambda-*
+                          Condition:
+                            StringEquals:
+                              iam:PassedToService: lambda.amazonaws.com
+                            ForAnyValue:StringEquals:
+                              aws:CalledVia: cloudformation.amazonaws.com
+                        # else
+                        - !Ref AWS::NoValue
+
+

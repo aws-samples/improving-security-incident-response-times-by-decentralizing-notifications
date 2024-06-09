@@ -1,0 +1,576 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# CloudFormation template to send notifications on Security Hub findings.
+
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::LanguageExtensions
+Description: Security Hub notifications
+
+#################
+# Configuration #
+#   Variables   #
+#################
+# These are kept here in Mappings instead of Parameters to avoid asking every user for these variables:
+Mappings:
+  Configuration:
+    Variables:
+      # If you have deployed the given IAM role to every account, then
+      # set this to Yes
+      UseIAMPermissionBoundary: 'No'
+      IAMPermissionBoundaryName: 'SecurityHubNotificationsServiceCatalogPermissionBoundary'
+
+      # Set this to "No" to avoid creating IAM roles or Lambda
+      UseLambda: 'Yes'
+
+      # The rest of the configuration only applies if using Lambda:
+
+      # Timezone (python zoneinfo format, for example Australia/Melbourne).
+      # If you have global users, consider moving this to a Parameter.
+      Timezone: 'UTC'
+
+      # Whether to ignore updated events for the same Security Hub control finding.
+      # Set this to 'Yes' to avoid getting repeated alerts for the same findings every day.
+      # Notifications will only be sent for new Security Hub findings when this solution is set up.
+      #    This is done by only showing unresolved control findings that have the same created & updated date.
+      # Set this to 'No' to get reminders of unresolved Security Hub findings every day.
+      NeworResolvedSecurityHubControlFindingsOnly: 'Yes'
+
+      # If you use IAM Identity Center, the emails sent in the notifications
+      # can include a URL with a direct link to authenticate with
+      # IAM Identity Center.
+      # To set this, enter the subdmain of your IAM Identity Center URL, for example,
+      # if your IAM Identity Center URL looks like this:
+      # https://d-abcd1234.awsapps.com/start/#/
+      # then it'd be IAMIdentityCenterSubdomain: d-abcd1234
+      IAMIdentityCenterSubdomain: 'unset'
+
+
+      
+
+##############
+# Parameters #
+##############
+
+Parameters:
+  EmailAddresses:
+    Description: Comma separated list of email addresses to send security notifications, no spaces.
+    Type: CommaDelimitedList
+    # Regex for comma separated list of email addressses:
+    AllowedPattern: ^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+(,[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)*$
+
+#  PermissionSet:  # Uncomment-if-using-IAM-Identity-Center
+#    Description: (Optional) IAM Identity Center permission set you use to access Security Hub. Used for generating a direct URL link to security finding.  # Uncomment-if-using-IAM-Identity-Center
+#    Type: String  # Uncomment-if-using-IAM-Identity-Center
+#    Default: 'AWSPowerUserAccess'  # Uncomment-if-using-IAM-Identity-Center
+
+  MinimumSeverity:
+    Description: Minimum severity level for notifications
+    Type: String
+    Default: High
+    AllowedValues:
+      - Critical
+      - High
+      - Medium
+      - Low
+
+  NotifyWhenResolved:
+    Description: Whether to notify when a finding is resolved
+    Type: String
+    Default: "Yes"
+    AllowedValues:
+      - "Yes"
+      - "No"
+
+  TagKey:
+    Description: (Optional) Only notify for findings with resources having this tag key. For example, you can limit findings to a certain application, if tagged appropriately. Note that you will miss findings that are not linked to resources, such as account level findings.
+    Type: String
+    Default: ''
+    AllowedPattern: (^[ a-zA-Z0-9_+-=.,_:/@]+$|^$)
+
+  TagValues:
+    Description: (Only required if tag key is specified) Comma separate list of values to match for the tag key above.
+    Type: CommaDelimitedList
+    Default: ''
+    AllowedPattern: (^[ a-zA-Z0-9_+-=.,_:/@]+$|^$)
+
+  RestrictProductFindings:
+    Description: Whether to restrict notification on findings on certain security products (eg. exclude Security Hub findings, or only include GuardDuty alerts)
+    Type: String
+    Default: "Do not limit products"
+    AllowedValues:
+      - "Do not limit products"
+      - "Only include listed products"
+      - "Exclude listed products"  
+
+  ProductList:
+    Description: >
+      (Only relevant if you are including or excluding products) Comma separated list of products, for example "Security Hub, GuardDuty" . To see the list of AWS products, use the command: 
+      aws securityhub describe-products --query "Products[?CompanyName == 'AWS' || CompanyName == 'Amazon'].ProductName"
+    Type: CommaDelimitedList
+    Default: ''
+    AllowedPattern: (^[ a-zA-Z0-9_+-=._:/]+$|^$)
+    
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+         default: Notification details
+        Parameters:
+          - EmailAddresses
+          - PermissionSet  # Uncomment-if-using-IAM-Identity-Center
+          - MinimumSeverity
+          - NotifyWhenResolved
+      - Label:
+         default: (Optional) Filter findings by tag
+        Parameters:
+          - TagKey
+          - TagValues
+      - Label:
+         default: (Optional) Filter findings by product
+        Parameters:
+          - RestrictProductFindings
+          - ProductList
+    ParameterLabels:
+      EmailAddresses:
+        default: Comma separated list of email addresses
+      TagKey:
+        default: Tag Key
+      TagValues:
+        default: Tag Values
+      RestrictProductFindings:
+        default: Restrict notifications to specific products?
+      ProductList:
+        default: If restricting findings, list of products
+      MinimumSeverity:
+        default: Minimum severity
+      NotifyWhenResolved:
+        default: Notify when resolved?
+      PermissionSet: # Uncomment-if-using-IAM-Identity-Center
+        default: Permission Set  # Uncomment-if-using-IAM-Identity-Center
+        
+
+Conditions:
+
+  # If using Lambda:
+  UsingLambda: !Equals [ !FindInMap [ Configuration, Variables, UseLambda ], "Yes" ]
+
+  # If using IAM Identity center:
+  UsingIAMIdentityCenter: !Not [ !Equals [ !FindInMap [ Configuration, Variables, IAMIdentityCenterSubdomain ], "unset" ] ]
+
+  # If permission boundaries are set:
+  UseIAMPermissionBoundary: !Equals [ !FindInMap [ Configuration, Variables, UseIAMPermissionBoundary ], "Yes" ]
+
+  # When to notify based on severity levels:
+  MinimumSeverityLow: !Equals [ !Ref MinimumSeverity, 'Low' ]
+  MinimumSeverityMedium: !Equals [ !Ref MinimumSeverity, 'Medium' ]
+  MinimumSeverityHigh: !Equals [ !Ref MinimumSeverity, 'High' ]
+  MinimumSeverityCritical: !Equals [ !Ref MinimumSeverity, 'Critical' ]
+  NotifyWhenResolved: !Equals [ !Ref NotifyWhenResolved, "Yes" ]
+
+  # If a tag was specified:
+  HasTagKey: !Not [ !Equals [ !Ref TagKey, "" ] ]
+
+  # If product name is restricted:
+  ProductListIsRestricted: !Not [ !Equals [ !Ref RestrictProductFindings, "Do not limit products" ] ]
+  ExcludeListedProducts: !Equals [ !Ref RestrictProductFindings, "Exclude listed products" ]
+
+Resources:
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Security Hub Notification
+
+  NotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [ !Ref NotificationTopic ]
+      PolicyDocument:
+        Statement:
+          - Sid: TrustEvents
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref NotificationTopic
+
+  # Subscribe each email address specified to the topic:
+  Fn::ForEach::EmailAddressSpecified:
+    - EmailAddress
+    - !Ref EmailAddresses
+    - "Subscription&{EmailAddress}":
+        Type: AWS::SNS::Subscription
+        Properties:
+          Protocol: email
+          Endpoint: !Ref EmailAddress
+          TopicArn: !Ref NotificationTopic
+
+
+  SecurityHubNotificationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub 
+        - Security Hub alert rule for ${Emails}
+        - Emails: !Join [ ",", !Ref EmailAddresses ]
+      State: ENABLED
+      Targets:
+        - !If
+          - UsingLambda
+          # then use Lambda to format:
+          - Id: lambda-function
+            Arn: !GetAtt SendSecurityHubAlertFunction.Arn
+          # else use InputTransformers:
+          - Id: sns-topic
+            Arn: !Ref NotificationTopic
+            InputTransformer:
+              InputPathsMap:
+                severity: "$.detail.findings[0].Severity.Label"
+                status: "$.detail.findings[0].Workflow.Status"
+                state: "$.detail.findings[0].RecordState"
+                account: "$.detail.findings[0].AwsAccountId"
+                accountname: "$.detail.findings[0].AwsAccountName"
+                productname: "$.detail.findings[0].ProductName"
+                title: "$.detail.findings[0].Title"
+                id: "$.detail.findings[0].Id"
+                type: "$.detail.findings[0].Types"
+                description: "$.detail.findings[0].Description"
+                rawdata: "$.detail.findings"
+                region: "$.detail.findings[0].Region"
+                resourcetype: "$.detail.findings[0].Resources[0].Type"
+                resourcetags: "$.detail.findings[0].Resources[0].Tags"
+                resourceid: "$.detail.findings[0].Resources[0].Id"
+                created: "$.detail.findings[0].CreatedAt"
+                updated: "$.detail.findings[0].UpdatedAt"
+                recommendation: "$.detail.findings[0].Remediation.Recommendation"
+              InputTemplate: !Sub |
+                  "There is a <severity> severity <state> finding in AWS Security Hub for the AWS account ID <account>: <title>"
+
+                  "AWS Account ID: <account>"
+                  "AWS Account name: <accountname>"
+                  "Region: <region>"
+
+                  "Product: <productname>"
+                  "Title: <title>"
+                  "Severity: <severity>"
+                  "Description: <description>"
+                  "Type(s): <type>"
+                  "Created at (UTC): <created>"
+                  "Updated at (UTC): <updated>"
+                  "Resource type: <resourcetype>"
+                  "Resource ID: <resourceid>"
+                  "Resource tags: <resourcetags>"
+                  "Recommendation: <recommendation>"
+                  "Security Hub Id: <id>"
+
+                  "For more information, log into the <account> account and go to: https://${AWS::Region}.console.aws.amazon.com/securityhub/home?region=${AWS::Region}#/findings?search=Id%3D%255Coperator%255C%253AEQUALS%255C%253A<id>"             
+
+                  "Raw Data: <rawdata>"
+
+      # Using a JSON string as the event pattern instead of
+      # putting it as YAML, because for the tag key, YAML would not
+      # allow for having the Resources Tags key to be dynamic (parameter).
+      EventPattern: !Sub
+        - |
+          { 
+            "detail-type": ["Security Hub Findings - Imported"],
+            "source": ["aws.securityhub"],
+            "detail": {
+              "findings": {
+                "Workflow": {
+                  "Status": ${__WORKFLOWSTATUS_}
+                },
+                ${__RESOURCES__}
+                ${__PRODUCTS__}
+                "Severity": {
+                  "Label": ${__SEVERITIES__}
+                }
+              }
+            }
+          }
+        - __WORKFLOWSTATUS_: !If
+          - NotifyWhenResolved
+          # then
+          - '[ "NEW", "RESOLVED" ]'
+          # else
+          - '[ "NEW" ]'
+
+          __SEVERITIES__: !If
+          - MinimumSeverityCritical
+          - '[ "CRITICAL" ]'
+          - !If
+            - MinimumSeverityHigh
+            - '[ "CRITICAL", "HIGH" ]'
+            - !If
+              - MinimumSeverityMedium
+              - '[ "CRITICAL", "HIGH", "MEDIUM" ]'
+              - !If
+                - MinimumSeverityLow
+                - '[ "CRITICAL", "HIGH", "MEDIUM", "LOW" ]'
+                - !Ref AWS::NoValue # should not reach here
+
+          # Only if Tag key was specified:
+          __RESOURCES__: !If 
+            - HasTagKey
+            - !Sub 
+              - |
+                "Resources": {
+                  "Tags": {
+                    "${TagKey}": ${__TAGVALUES__}
+                  }
+                },
+              - __TAGVALUES__: 
+                  Fn::ToJsonString: !Ref TagValues
+            - ""
+
+          # Only if Product was specified:
+          __PRODUCTS__: !If
+            - ProductListIsRestricted
+            - !If
+              - ExcludeListedProducts
+              # If excluding product names:
+              - !Sub
+                - |
+                  "ProductName": [ { "anything-but": ${__PRODUCTLIST__} } ],
+                - __PRODUCTLIST__: 
+                    Fn::ToJsonString: !Ref ProductList
+              # If not excluding product names:
+              - !Sub
+                - |
+                  "ProductName": ${__PRODUCTLIST__},
+                - __PRODUCTLIST__: 
+                    Fn::ToJsonString: !Ref ProductList
+            - ""
+
+#--------------------------------------------------------------------------------------
+
+####################
+# Lambda resources #
+####################
+
+# The following resources are not created if UseLambda is set to No
+
+  PermissionForEventsToInvokeLambda:
+    Condition: UsingLambda
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SendSecurityHubAlertFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SecurityHubNotificationRule.Arn
+
+
+  SendSecurityHubAlertFunction:
+    Condition: UsingLambda
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Security Hub alerts via SNS
+      Role: !GetAtt SendSecurityHubAlertRole.Arn
+      Runtime: python3.12
+      MemorySize: 128
+      Timeout: 900
+      Handler: index.handler
+      Environment:
+        Variables:
+          SNS_TOPIC: !Ref NotificationTopic
+          USING_IAM_IDENTITY_CENTER: !If [ UsingIAMIdentityCenter, "Yes", "No" ]
+          IAM_IDENTITY_CENTER_SUBDOMAIN: !FindInMap [ Configuration, Variables, IAMIdentityCenterSubdomain ]
+          PERMISSION_SET: !If [ UsingIAMIdentityCenter, !Ref PermissionSet, 'unset' ]
+          AVOID_SH_REPEATS: !FindInMap [ Configuration, Variables, NeworResolvedSecurityHubControlFindingsOnly ]
+          TIMEZONE: !FindInMap [ Configuration, Variables, Timezone ]
+      Code:
+        ZipFile: |
+          import boto3
+          from botocore.config import Config
+          import json
+          import traceback
+          import logging
+          import os
+          import urllib.parse
+          from datetime import datetime
+          import zoneinfo
+
+          btconfig = Config(retries={'max_attempts': 10, 'mode': 'standard'})
+          sns = boto3.client('sns', config=btconfig)
+
+          sns_topic = os.environ['SNS_TOPIC']
+          using_iam_identity_center = os.environ['USING_IAM_IDENTITY_CENTER']
+          iam_identity_center_subdomain = os.environ['IAM_IDENTITY_CENTER_SUBDOMAIN']
+          permission_set = os.environ['PERMISSION_SET']
+          avoid_sh_repeats = os.environ['AVOID_SH_REPEATS']
+          timezone = os.environ['TIMEZONE']
+
+          # Gets a UTC ISO format timestring, returns formated string in TIMEZONE
+          def get_timezoned_str(timestr):
+            try:
+              utc_dt = datetime.fromisoformat(timestr)
+              tz = zoneinfo.ZoneInfo(timezone)
+              return utc_dt.astimezone(tz).strftime("%A %d %B %Y %H:%M:%S (%Z)")
+            except:
+              print(f'Timezone conversion failed, probably did not recognize timezone {timezone}')
+              return timestr
+
+          # Return printable string like "    label: value['key']" if it exists, otherwise ''
+          def get(dct, label, *keys):
+            indent = 8
+            for key in keys:
+              try:
+                dct = dct[key]
+              except KeyError:
+                return ''
+
+            if type(dct) is str:
+              return f'{" " * indent}{label}: {dct}\n'
+
+            if type(dct) is dict:
+              temp = f'{" " * indent}{label}:\n'
+              for key,val in dct.items():
+                temp += f'{" " * (indent+4)}{key}: {val}\n'
+              return temp
+
+            if type(dct) is list:
+              if len(dct) == 1:
+                return f'{" " * indent}{label}: {dct[0]}\n'
+              temp = f'{" " * indent}{label}:\n'
+              for item in dct:
+                temp += f'{" " * (indent+4)}- {item}\n'
+              return temp
+
+          def handler(event, context):
+            finding = event['detail']['findings'][0]
+            severity = finding.get('Severity',{}).get('Label', 'Unknown')
+            workflow_status = finding.get('Workflow',{}).get('Status', 'Unknown')
+            record_state = finding.get('RecordState','Unknown')
+            title = finding.get('Title', 'No title')
+            account_id = finding.get('AwsAccountId', 'Unknown')
+            account_label = finding.get('AwsAccountName', account_id)
+            security_hub_id = finding.get('Id')
+            product = finding.get('ProductName')
+            created_at = finding.get('CreatedAt', 'created')
+            updated_at = finding.get('UpdatedAt', 'updated')
+
+            body = ''
+
+            if workflow_status != 'NEW':  # eg. workflow_status is RESOLVED
+              real_status = workflow_status
+              body += f'This finding is now {workflow_status}.\n\n'
+            elif record_state != 'ACTIVE': # eg. record_state is ARCHIVED
+              real_status = record_state
+              body += f'This finding is now {record_state}.\n\n'
+            else:
+              real_status = workflow_status
+
+            # Skip duplicate findings:
+            if avoid_sh_repeats == 'Yes':
+              if product == 'Security Hub' and real_status == 'NEW':
+                  if created_at != updated_at:
+                    print(f'Skipping notification on updated finding {security_hub_id}: CreatedAt and UpdatedAt is the same')
+                    return
+
+
+            subject = f'{severity} severity {real_status} Security Hub finding on {account_label}: {title}'
+            # SNS subjects are a max of 100 chars:
+            subject = (subject[:97]+'..') if len(subject) > 100 else subject
+
+            body += f'There is a {severity} severity {real_status} finding in AWS Security Hub: {title}\n'
+
+            body += '\nAccount details:\n'
+            body += get(finding, 'Account ID', 'AwsAccountId')
+            body += get(finding, 'Account Name', 'AwsAccountName')
+            try:
+              region = finding['Region']
+            except KeyError:
+              region = event['region']
+            body += get(region, 'Region')
+
+            body += '\nFinding details:\n'
+            body += get(finding, 'Product', 'ProductName')
+            body += get(finding, 'Title', 'Title')
+            body += get(finding, 'Severity', 'Severity', 'Label')
+            body += get(finding, 'Description', 'Description')
+            body += get(finding, 'Type(s)', 'Types')
+            body += get(get_timezoned_str(created_at), 'Created at')
+            body += get(get_timezoned_str(updated_at), 'Updated at')
+            body += get(finding, 'Recommendation', 'Remediation', 'Recommendation')
+            body += get(finding, 'Security Hub Id', 'Id')
+
+            if 'Resources' in finding:
+              if len(finding['Resources']) >= 1:
+                body += '\nResources:\n'
+                for resource in finding['Resources']:
+                  body += get(resource, 'Type', 'Type')
+                  body += get(resource, 'ID', 'Id')
+                  body += get(resource, 'Region', 'Region')
+                  body += get(resource, 'Tags', 'Tags')
+                  body += '\n'
+
+            encoded_finding_id = urllib.parse.quote_plus(security_hub_id)
+            url_prefix = f'https://{region}.console.aws.amazon.com/securityhub/home?region={region}#/findings?search=Id%3D%255Coperator%255C%253AEQUALS%255C%253A'
+            finding_url = f'{url_prefix}{encoded_finding_id}'
+
+            if using_iam_identity_center == 'Yes':
+              idc_destination = urllib.parse.quote_plus(f'{url_prefix}{security_hub_id}')
+              body += f'For more information, go to: https://{iam_identity_center_subdomain}.awsapps.com/start/#/console?account_id={account_id}&role_name={permission_set}&destination={idc_destination}\n'
+              body += f'If you are already logged into the {account_label} account, click on {finding_url}'
+            else:
+              body += f'For more information, log into the {account_label} account and go to: {finding_url}'
+
+            body += '\n\n\n'
+            body += '----------------\n'
+            body += 'This is the raw Security Hub finding JSON:\n\n'
+            body += json.dumps(event, indent=4, sort_keys=True)
+
+
+            sns.publish(
+              TopicArn = sns_topic,
+              Subject = subject,
+              Message = body,
+            )
+            print(f'Sent email for {security_hub_id} with subject {subject}.')
+
+
+  SendSecurityHubAlertLogGroup:
+    Condition: UsingLambda
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SendSecurityHubAlertFunction}
+      RetentionInDays: 7  
+
+
+  SendSecurityHubAlertRole:
+    Condition: UsingLambda
+    Type: AWS::IAM::Role
+    Properties:
+      # If modifying the role name pattern, and if you use a launch role, modify 
+      # the launch role's iam:PassRole permissions as well
+      RoleName: !Sub SecNotificationLambda-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      PermissionsBoundary: !If
+        - UseIAMPermissionBoundary
+        # then
+        - !Sub 
+          - arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${PermissionBoundary}
+          - PermissionBoundary: !FindInMap [ Configuration, Variables, IAMPermissionBoundaryName ]
+        # else
+        - !Ref AWS::NoValue
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: security-hub-alerts
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref NotificationTopic

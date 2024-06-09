@@ -1,0 +1,100 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: S3 bucket used by Service Catalog for the Security Notifications product
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3BucketLogs
+        LogFilePrefix: service-catalog-product-s3-logs
+      Tags:
+        - Key: description
+          Value: Used by the Service Catalog product for Security Notifications
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: SecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt S3Bucket.Arn
+              - !Sub "${S3Bucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+
+  S3BucketLogs:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+      Tags:
+        - Key: description
+          Value: Log bucket for S3 bucket for Service Catalog product for Security Notifications
+
+
+  S3BucketLogsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketLogs
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - s3:PutObject
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Resource: !Sub "${S3BucketLogs.Arn}/*"
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !GetAtt S3Bucket.Arn
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+
+Outputs:
+  BucketName:
+    Description: Bucket name
+    Value: !Ref S3Bucket
+
+  BucketURL:
+    Description: Bucket URL
+    Value: !Sub https://${S3Bucket.RegionalDomainName}
